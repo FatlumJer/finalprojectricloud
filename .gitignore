@@ -1,0 +1,14 @@
+# Terraform binaries and state
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+
+# Sensitive Sandbox info
+terraform.tfvars
+kubeconfig
+
+# .NET Build artifacts
+bin/
+obj/
+app/publish/
