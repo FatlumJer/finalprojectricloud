@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: todo-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: todo-api
+  template:
+    metadata:
+      labels:
+        app: todo-api
+    spec:
+      containers:
+      - name: api
+        image: ghcr.io/fatlumjer/finalprojectricloud:latest
+        workingDir: /app/api
+        command: ["dotnet"]
+        args: ["TodoApi.dll"]
+        env:
+        - name: ConnectionStrings__Redis
+          value: "redis:6379"
+        - name: REDIS_URL
+          value: "redis:6379"
+        ports:
+        - containerPort: 8080
+      imagePullSecrets:
+      - name: ghcr-auth
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: todo-service
+  namespace: default
+  labels:                
+    app: todo-api
+spec:
+  type: LoadBalancer
+  selector:
+    app: todo-api
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: todo-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: todo-worker
+  template:
+    metadata:
+      labels:
+        app: todo-worker
+    spec:
+      containers:
+      - name: worker
+        image: ghcr.io/fatlumjer/todo-worker:latest
+        workingDir: /app/worker
+        command: ["dotnet"]
+        args: ["worker.dll"]
+        env:
+        - name: ConnectionStrings__Redis
+          value: "redis:6379"
+        - name: REDIS_URL
+          value: "redis:6379"
+      imagePullSecrets:
+      - name: ghcr-auth

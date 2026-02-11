@@ -1,0 +1,12 @@
+services:
+  todo-api:
+    image: ghcr.io/fatlumjer/finalprojectricloud:latest
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+
+  todo-worker:
+    image: ghcr.io/fatlumjer/todo-worker:latest
+    build:
+      context: ./app
+      dockerfile: Dockerfile

@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aspnet-dashboards
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  aspnet-core.json: |-
+    {
+      "id": null,
+      "uid": "aspnet-dashboard",
+      "title": "ASP.NET Core Dashboard",
+      "panels": [
+        {
+          "title": "HTTP Requests",
+          "type": "graph",
+          "targets": [{ "expr": "http_requests_received_total" }]
+        }
+      ]
+    }
