@@ -26,14 +26,26 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
-      - name: Restore dependencies
-        run: dotnet restore ./app
+      - name: Restore API dependencies
+        run: dotnet restore ./app/api/TodoApi.csproj
 
-      - name: Build
-        run: dotnet build ./app --no-restore --configuration Release
+      - name: Restore Worker dependencies
+        run: dotnet restore ./app/worker/worker.csproj
+
+      - name: Build API
+        run: dotnet build ./app/api/TodoApi.csproj --no-restore --configuration Release
+
+      - name: Build Worker
+        run: dotnet build ./app/worker/worker.csproj --no-restore --configuration Release
 
       - name: Run tests
-        run: dotnet test ./app --no-build --configuration Release --verbosity normal
+        run: |
+          # Run tests if a test project exists, skip otherwise
+          if find ./app -name "*.Tests.csproj" -o -name "*Tests.csproj" | grep -q .; then
+            dotnet test ./app --no-build --configuration Release --verbosity normal
+          else
+            echo "No test projects found, skipping tests."
+          fi
 
   # ─────────────────────────────────────────────
   # JOB 2 — Build & Push single image to GHCR
