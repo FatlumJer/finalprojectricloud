@@ -40,16 +40,14 @@ jobs:
 
       - name: Run tests
         run: |
-          # Run tests if a test project exists, skip otherwise
-          if find ./app -name "*.Tests.csproj" -o -name "*Tests.csproj" | grep -q .; then
+          if find ./app -name "*Tests.csproj" | grep -q .; then
             dotnet test ./app --no-build --configuration Release --verbosity normal
           else
             echo "No test projects found, skipping tests."
           fi
 
   # ─────────────────────────────────────────────
-  # JOB 2 — Build & Push single image to GHCR
-  #         (contains both API + Worker binaries)
+  # JOB 2 — Build & Push image to GHCR
   # ─────────────────────────────────────────────
   docker-build-push:
     name: Build & Push Image to GHCR
@@ -83,18 +81,70 @@ jobs:
       - name: Build and push image
         uses: docker/build-push-action@v5
         with:
-          context: ./app        # Dockerfile is inside /app
+          context: ./app
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
   # ─────────────────────────────────────────────
-  # JOB 3 — Deploy to AKS
+  # JOB 3 — Terraform: provision VNet + AKS
+  # ─────────────────────────────────────────────
+  terraform:
+    name: Provision AKS with Terraform
+    runs-on: ubuntu-latest
+    needs: build-and-test
+
+    outputs:
+      cluster_name: ${{ steps.tf-output.outputs.cluster_name }}
+      resource_group: ${{ steps.tf-output.outputs.resource_group }}
+
+    env:
+      TF_VAR_subscription_id: ${{ secrets.TF_VAR_subscription_id }}  # Only this needs to be a secret
+      TF_VAR_resource_group_name: "1-7bfd29a8-playground-sandbox"
+      TF_VAR_location: "eastus"
+      TF_VAR_node_vm_size: "Standard_B2s"
+      TF_VAR_cluster_name: "aks-final-project"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Authenticate to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Terraform Init
+        working-directory: ./infra
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: ./infra
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        working-directory: ./infra
+        run: terraform apply -auto-approve tfplan
+
+      - name: Get Terraform outputs
+        id: tf-output
+        working-directory: ./infra
+        run: |
+          echo "cluster_name=$(terraform output -raw cluster_name)" >> $GITHUB_OUTPUT
+          echo "resource_group=$(terraform output -raw resource_group)" >> $GITHUB_OUTPUT
+
+  # ─────────────────────────────────────────────
+  # JOB 4 — Deploy to AKS
   # ─────────────────────────────────────────────
   deploy-to-aks:
     name: Deploy to AKS
     runs-on: ubuntu-latest
-    needs: docker-build-push
+    needs: [docker-build-push, terraform]
 
     steps:
       - name: Checkout code
@@ -111,10 +161,9 @@ jobs:
       - name: Set AKS context
         uses: azure/aks-set-context@v3
         with:
-          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
-          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+          resource-group: ${{ needs.terraform.outputs.resource_group }}
+          cluster-name: ${{ needs.terraform.outputs.cluster_name }}
 
-      # Allows AKS to pull the private image from GHCR
       - name: Create GHCR image pull secret
         run: |
           kubectl create secret docker-registry ghcr-auth \
@@ -123,21 +172,217 @@ jobs:
             --docker-password=${{ secrets.GITHUB_TOKEN }} \
             --dry-run=client -o yaml | kubectl apply -f -
 
-      # Deploy Redis first — API and worker both depend on it
       - name: Deploy Redis
         run: kubectl apply -f k8s/redis.yaml
 
-      # Deploy API and worker deployments + service
       - name: Deploy app manifests
         run: kubectl apply -f k8s/deployment.yaml
 
-      # Update todo-api to use the exact SHA image from this build
       - name: Update todo-api image
         run: |
           kubectl set image deployment/todo-api \
             api=${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
 
-      # Update todo-worker to use the same image (different entrypoint via args)
+      - name: Update todo-worker image
+        run: |
+          kubectl set image deployment/todo-worker \
+            worker=${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+
+      - name: Wait for todo-api rollout
+        run: kubectl rollout status deployment/todo-api --timeout=120s
+
+      - name: Wait for todo-worker rollout
+        run: kubectl rollout status deployment/todo-worker --timeout=120s
+
+      - name: Get service external IP
+        run: |
+          echo "Waiting for external IP..."
+          sleep 30
+          kubectl get service todo-servicename: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/fatlumjer/finalprojectricloud
+
+jobs:
+  # ─────────────────────────────────────────────
+  # JOB 1 — Build & Test the .NET app
+  # ─────────────────────────────────────────────
+  build-and-test:
+    name: Build & Test .NET App
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore API dependencies
+        run: dotnet restore ./app/api/TodoApi.csproj
+
+      - name: Restore Worker dependencies
+        run: dotnet restore ./app/worker/worker.csproj
+
+      - name: Build API
+        run: dotnet build ./app/api/TodoApi.csproj --no-restore --configuration Release
+
+      - name: Build Worker
+        run: dotnet build ./app/worker/worker.csproj --no-restore --configuration Release
+
+      - name: Run tests
+        run: |
+          if find ./app -name "*Tests.csproj" | grep -q .; then
+            dotnet test ./app --no-build --configuration Release --verbosity normal
+          else
+            echo "No test projects found, skipping tests."
+          fi
+
+  # ─────────────────────────────────────────────
+  # JOB 2 — Build & Push image to GHCR
+  # ─────────────────────────────────────────────
+  docker-build-push:
+    name: Build & Push Image to GHCR
+    runs-on: ubuntu-latest
+    needs: build-and-test
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # ─────────────────────────────────────────────
+  # JOB 3 — Terraform: provision VNet + AKS
+  # ─────────────────────────────────────────────
+  terraform:
+    name: Provision AKS with Terraform
+    runs-on: ubuntu-latest
+    needs: build-and-test
+
+    outputs:
+      cluster_name: ${{ steps.tf-output.outputs.cluster_name }}
+      resource_group: ${{ steps.tf-output.outputs.resource_group }}
+
+    env:
+      TF_VAR_subscription_id: ${{ secrets.TF_VAR_subscription_id }}  # Only this needs to be a secret
+      TF_VAR_resource_group_name: "1-7bfd29a8-playground-sandbox"
+      TF_VAR_location: "eastus"
+      TF_VAR_node_vm_size: "Standard_B2s"
+      TF_VAR_cluster_name: "aks-final-project"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Authenticate to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Terraform Init
+        working-directory: ./infra
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: ./infra
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        working-directory: ./infra
+        run: terraform apply -auto-approve tfplan
+
+      - name: Get Terraform outputs
+        id: tf-output
+        working-directory: ./infra
+        run: |
+          echo "cluster_name=$(terraform output -raw cluster_name)" >> $GITHUB_OUTPUT
+          echo "resource_group=$(terraform output -raw resource_group)" >> $GITHUB_OUTPUT
+
+  # ─────────────────────────────────────────────
+  # JOB 4 — Deploy to AKS
+  # ─────────────────────────────────────────────
+  deploy-to-aks:
+    name: Deploy to AKS
+    runs-on: ubuntu-latest
+    needs: [docker-build-push, terraform]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Authenticate to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ needs.terraform.outputs.resource_group }}
+          cluster-name: ${{ needs.terraform.outputs.cluster_name }}
+
+      - name: Create GHCR image pull secret
+        run: |
+          kubectl create secret docker-registry ghcr-auth \
+            --docker-server=ghcr.io \
+            --docker-username=${{ github.actor }} \
+            --docker-password=${{ secrets.GITHUB_TOKEN }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy Redis
+        run: kubectl apply -f k8s/redis.yaml
+
+      - name: Deploy app manifests
+        run: kubectl apply -f k8s/deployment.yaml
+
+      - name: Update todo-api image
+        run: |
+          kubectl set image deployment/todo-api \
+            api=${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+
       - name: Update todo-worker image
         run: |
           kubectl set image deployment/todo-worker \

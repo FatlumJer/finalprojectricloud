@@ -17,3 +17,11 @@ module "aks" {
   node_vm_size        = var.node_vm_size
   subnet_id           = module.network.subnet_id
 }
+
+output "cluster_name" {
+  value = module.aks.cluster_name
+}
+
+output "resource_group" {
+  value = data.azurerm_resource_group.sandbox.name
+}
