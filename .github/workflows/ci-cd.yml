@@ -1,0 +1,144 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/fatlumjer/finalprojectricloud
+
+jobs:
+  # ─────────────────────────────────────────────
+  # JOB 1 — Build & Test the .NET app
+  # ─────────────────────────────────────────────
+  build-and-test:
+    name: Build & Test .NET App
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore dependencies
+        run: dotnet restore ./app
+
+      - name: Build
+        run: dotnet build ./app --no-restore --configuration Release
+
+      - name: Run tests
+        run: dotnet test ./app --no-build --configuration Release --verbosity normal
+
+  # ─────────────────────────────────────────────
+  # JOB 2 — Build & Push single image to GHCR
+  #         (contains both API + Worker binaries)
+  # ─────────────────────────────────────────────
+  docker-build-push:
+    name: Build & Push Image to GHCR
+    runs-on: ubuntu-latest
+    needs: build-and-test
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app        # Dockerfile is inside /app
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # ─────────────────────────────────────────────
+  # JOB 3 — Deploy to AKS
+  # ─────────────────────────────────────────────
+  deploy-to-aks:
+    name: Deploy to AKS
+    runs-on: ubuntu-latest
+    needs: docker-build-push
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Authenticate to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+
+      # Allows AKS to pull the private image from GHCR
+      - name: Create GHCR image pull secret
+        run: |
+          kubectl create secret docker-registry ghcr-auth \
+            --docker-server=ghcr.io \
+            --docker-username=${{ github.actor }} \
+            --docker-password=${{ secrets.GITHUB_TOKEN }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      # Deploy Redis first — API and worker both depend on it
+      - name: Deploy Redis
+        run: kubectl apply -f k8s/redis.yaml
+
+      # Deploy API and worker deployments + service
+      - name: Deploy app manifests
+        run: kubectl apply -f k8s/deployment.yaml
+
+      # Update todo-api to use the exact SHA image from this build
+      - name: Update todo-api image
+        run: |
+          kubectl set image deployment/todo-api \
+            api=${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+
+      # Update todo-worker to use the same image (different entrypoint via args)
+      - name: Update todo-worker image
+        run: |
+          kubectl set image deployment/todo-worker \
+            worker=${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+
+      - name: Wait for todo-api rollout
+        run: kubectl rollout status deployment/todo-api --timeout=120s
+
+      - name: Wait for todo-worker rollout
+        run: kubectl rollout status deployment/todo-worker --timeout=120s
+
+      - name: Get service external IP
+        run: |
+          echo "Waiting for external IP..."
+          sleep 30
+          kubectl get service todo-service
