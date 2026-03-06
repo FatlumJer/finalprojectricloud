@@ -116,7 +116,7 @@ jobs:
       - name: Update todo-worker image
         run: |
           kubectl set image deployment/todo-worker \
-            worker=${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+            worker=ghcr.io/fatlumjer/todo-worker:latest
 
       - name: Wait for rollouts
         run: |
