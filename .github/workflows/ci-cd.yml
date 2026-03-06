@@ -104,14 +104,14 @@ jobs:
         run: |
           kubectl create secret docker-registry ghcr-auth \
             --docker-server=ghcr.io \
-            --docker-username=${{ github.actor }} \
-            --docker-password=${{ secrets.GITHUB_TOKEN }} \
+            --docker-username=FatlumJer \
+            --docker-password=${{ secrets.GHCR_PAT }} \
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Update todo-api image
         run: |
           kubectl set image deployment/todo-api \
-            api=${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+            api=${{ env.IMAGE_NAME }}:latest
 
       - name: Update todo-worker image
         run: |
@@ -120,5 +120,5 @@ jobs:
 
       - name: Wait for rollouts
         run: |
-          kubectl rollout status deployment/todo-api --timeout=120s
-          kubectl rollout status deployment/todo-worker --timeout=120s
+          kubectl rollout status deployment/todo-api --timeout=300s
+          kubectl rollout status deployment/todo-worker --timeout=300s
