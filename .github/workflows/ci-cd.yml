@@ -94,19 +94,11 @@ jobs:
     needs: docker-build-push
 
     steps:
-      - name: Authenticate to Azure
+      - name: Set up kubeconfig
         run: |
-          az login \
-            --username "${{ secrets.AZURE_USERNAME }}" \
-            --password "${{ secrets.AZURE_PASSWORD }}"
-          az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
-
-      - name: Set AKS context
-        run: |
-          az aks get-credentials \
-            --resource-group "1-7bfd29a8-playground-sandbox" \
-            --name "aks-final-project" \
-            --overwrite-existing
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
 
       - name: Create GHCR image pull secret
         run: |
